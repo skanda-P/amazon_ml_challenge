@@ -27,10 +27,14 @@ Group D – Categorical
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from src.preprocess import (
     encode_country,
@@ -271,18 +275,32 @@ def build_feature_matrix(
     embed_scores: dict[tuple[str, str], float] | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """
-    Build full feature matrix for all candidate pairs.
+    Build full feature matrix for all candidate pairs with verbatim progress logging.
 
     embed_scores: optional dict (s1_id, cand_id) → cosine similarity
     Returns: (pairs_df, X)
     """
-    s1_lkp   = s1.set_index("entity_id").to_dict("index")
-    pool_lkp = pool.set_index("entity_id").to_dict("index")
+    total_pairs = sum(len(cand_ids) for cand_ids in candidates.values())
+    logger.info(f"Extracting {len(FEATURE_NAMES)} features for {total_pairs:,} candidate pairs …")
+    if total_pairs == 0:
+        return pd.DataFrame(columns=["source1_entity_id", "candidate_entity_id"]), np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
+
+    t0 = time.time()
+    s1_ids_set = set(candidates.keys())
+    cand_ids_set = {cid for cids in candidates.values() for cid in cids}
+
+    # High-performance filtered lookups: Avoid indexing all 10M pool rows, index only candidate entities
+    s1_sub = s1[s1["entity_id"].isin(s1_ids_set)]
+    pool_sub = pool[pool["entity_id"].isin(cand_ids_set)]
+    s1_lkp   = s1_sub.set_index("entity_id").to_dict("index")
+    pool_lkp = pool_sub.set_index("entity_id").to_dict("index")
     if embed_scores is None:
         embed_scores = {}
 
     rows_meta: list[dict] = []
     rows_feat: list[np.ndarray] = []
+    pair_count = 0
+    last_log_time = t0
 
     for s1_id, cand_ids in candidates.items():
         s1_row = s1_lkp.get(s1_id, {})
@@ -295,11 +313,27 @@ def build_feature_matrix(
             rows_meta.append({"source1_entity_id": s1_id,
                                "candidate_entity_id": c_id})
             rows_feat.append(feat)
+            pair_count += 1
+
+            now = time.time()
+            if now - last_log_time >= 5.0 or pair_count == total_pairs:
+                elapsed = now - t0
+                rate = pair_count / max(elapsed, 0.001)
+                rem = total_pairs - pair_count
+                eta_s = rem / max(rate, 0.001)
+                eta_m, eta_sec = divmod(int(eta_s), 60)
+                logger.info(
+                    f"    Features progress: {pair_count:,}/{total_pairs:,} pairs ({100*pair_count/total_pairs:5.1f}%) | "
+                    f"{rate:6.1f} pairs/s | Elapsed: {int(elapsed)}s | ETA: {eta_m}m {eta_sec:02d}s"
+                )
+                last_log_time = now
 
     pairs_df = pd.DataFrame(rows_meta)
     X = (np.vstack(rows_feat)
          if rows_feat
          else np.empty((0, len(FEATURE_NAMES)), dtype=np.float32))
+    elapsed = time.time() - t0
+    logger.info(f"✓ Feature extraction complete: {len(pairs_df):,} pairs in {elapsed:.1f}s ({len(pairs_df)/max(elapsed, 0.001):.1f} pairs/s)")
     return pairs_df, X
 
 

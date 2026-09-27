@@ -15,6 +15,7 @@ blocking:
   embed_model:      "intfloat/multilingual-e5-large"   # MIT, ~560M params
   use_embeddings:   false    # set true to enable embedding kNN (slower, better for France)
   device:           "auto"   # "auto" (uses CUDA GPU with CPU fallback), "cuda", or "cpu"
+  batch_size:       256      # fast query batching for blocking
 
 model:
   device:           "auto"   # "auto" (uses CUDA GPU with CPU fallback), "cuda", or "cpu"
@@ -32,6 +33,10 @@ stacking:
 validation:
   val_size:     0.20         # fraction of S1 entities held out
   random_state: 42
+
+training:
+  max_train_entities: 25000  # sample of S1 entities for training (half data for fast iteration)
+  max_val_entities:   5000   # sample of S1 entities for validation evaluation
 
 threshold:
   search_start: 0.10

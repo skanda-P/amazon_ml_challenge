@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import time
 from pathlib import Path
 from typing import Any
 
@@ -159,14 +160,20 @@ def train_oof(
     fold_models = []
 
     for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
+        t_fold = time.time()
         X_tr, X_va = X[tr_idx], X[va_idx]
         y_tr, y_va = y[tr_idx], y[va_idx]
 
         m = pickle.loads(pickle.dumps(model))   # fresh copy each fold
         safe_fit(m, X_tr, y_tr)
-        oof[va_idx] = safe_predict_proba(m, X_va)[:, 1]
+        val_probs = safe_predict_proba(m, X_va)[:, 1]
+        oof[va_idx] = val_probs
         fold_models.append(m)
-        logger.info(f"  Fold {fold}/{n_splits} done")
+        dt = time.time() - t_fold
+        pos_val = int(y_va.sum())
+        logger.info(
+            f"    [Fold {fold}/{n_splits}] Completed in {dt:.1f}s | Val samples: {len(y_va):,} (positives: {pos_val:,})"
+        )
 
     return oof, fold_models
 
