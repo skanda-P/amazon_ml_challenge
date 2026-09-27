@@ -1,3 +1,6 @@
+system:
+  device: "auto"        # "auto" (uses CUDA GPU if present, with automatic CPU fallback), "cuda", or "cpu"
+
 data:
   train_dir: "../../data/dataset/train"
   test_dir:  "../../data/dataset/test"
@@ -11,8 +14,10 @@ blocking:
   embed_min_score:  0.70     # min cosine to include in embedding pass
   embed_model:      "intfloat/multilingual-e5-large"   # MIT, ~560M params
   use_embeddings:   false    # set true to enable embedding kNN (slower, better for France)
+  device:           "auto"   # "auto" (uses CUDA GPU with CPU fallback), "cuda", or "cpu"
 
 model:
+  device:           "auto"   # "auto" (uses CUDA GPU with CPU fallback), "cuda", or "cpu"
   n_estimators:     500
   max_depth:        7
   num_leaves:       63

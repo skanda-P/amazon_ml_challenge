@@ -12,6 +12,7 @@ Singletons (no true matches) score:
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 
 def f_beta(precision: float, recall: float, beta: float = 0.5) -> float:
@@ -73,8 +74,6 @@ def evaluate_from_files(
 
     Returns dict with keys: macro_f05, precision_mean, recall_mean
     """
-    import pandas as pd
-
     pred_df = pd.read_csv(predictions_path, sep="\t", dtype=str).fillna("")
     gt_df   = pd.read_csv(ground_truth_path, sep="\t", dtype=str).fillna("")
 

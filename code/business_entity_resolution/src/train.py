@@ -36,6 +36,9 @@ from src.models import (
     load_artefact,
     make_lgbm,
     make_xgb,
+    meta_predict,
+    safe_fit,
+    safe_predict_proba,
     save_artefacts,
     train_meta,
     train_oof,
@@ -187,8 +190,8 @@ def train(cfg: dict) -> None:
 
     # ── 6. Val predictions from each base model (full train → val) ────────
     # Average fold models for val prediction
-    lgbm_va_p = np.mean([m.predict_proba(X_va)[:, 1] for m in lgbm_folds], axis=0)
-    xgb_va_p  = np.mean([m.predict_proba(X_va)[:, 1] for m in xgb_folds],  axis=0)
+    lgbm_va_p = np.mean([safe_predict_proba(m, X_va)[:, 1] for m in lgbm_folds], axis=0)
+    xgb_va_p  = np.mean([safe_predict_proba(m, X_va)[:, 1] for m in xgb_folds],  axis=0)
 
     # Embed cosine is already in features (index 21 in FEATURE_NAMES)
     embed_idx = FEATURE_NAMES.index("embed_cosine")
@@ -211,7 +214,6 @@ def train(cfg: dict) -> None:
     )
 
     # Val meta prediction
-    from src.models import meta_predict
     margin_va = add_margin_feature(pairs_va, lgbm_va_p)
     val_proba = meta_predict(
         meta, scaler,
@@ -243,10 +245,10 @@ def train(cfg: dict) -> None:
     # ── 9. Retrain base models on full training data ───────────────────────
     logger.info("Retraining base models on full training data …")
     lgbm_final = make_lgbm(m_cfg)
-    lgbm_final.fit(X_tr, y_tr)
+    safe_fit(lgbm_final, X_tr, y_tr)
 
     xgb_final = make_xgb(m_cfg)
-    xgb_final.fit(X_tr, y_tr)
+    safe_fit(xgb_final, X_tr, y_tr)
 
     # ── 10. Save artefacts ────────────────────────────────────────────────
     save_artefacts(

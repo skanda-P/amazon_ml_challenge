@@ -14,12 +14,29 @@ Union of both → candidate_pairs.tsv
 from __future__ import annotations
 
 import logging
+import os
+import pickle
 from collections import defaultdict
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    import faiss
+    _HAS_FAISS = True
+except ImportError:
+    faiss = None  # type: ignore[assignment]
+    _HAS_FAISS = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    _HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    SentenceTransformer = None  # type: ignore[assignment]
+    _HAS_SENTENCE_TRANSFORMERS = False
 
 from src.preprocess import normalise_address, normalise_name
 
@@ -61,6 +78,14 @@ def _tfidf_topk(
     return results
 
 
+def _is_cuda_available() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
+
+
 # ── Embedding helpers ────────────────────────────────────────────────────────
 
 def _build_embedding_index(
@@ -68,25 +93,60 @@ def _build_embedding_index(
     pool_texts: list[str],
     model_name: str,
     batch_size: int = 64,
+    device: str = "auto",
 ):
-    """Encode pool records and build a FAISS flat-IP index. Returns (index, ids array)."""
-    try:
-        from sentence_transformers import SentenceTransformer
-        import faiss
-    except ImportError:
+    """Encode pool records and build a FAISS flat-IP index. Returns (index, model)."""
+    if not _HAS_FAISS or not _HAS_SENTENCE_TRANSFORMERS or faiss is None or SentenceTransformer is None:
+        logger.warning(
+            "Embedding blocking requires 'sentence-transformers' and 'faiss-cpu'. "
+            "Skipping embedding index."
+        )
         return None, None
 
-    logger.info(f"  Loading embedding model {model_name} …")
-    model = SentenceTransformer(model_name)
+    # Resolve device with GPU preference and CPU backup
+    target_device = "cpu"
+    if device == "cuda" or (device == "auto" and _is_cuda_available()):
+        target_device = "cuda"
 
-    logger.info(f"  Encoding {len(pool_texts):,} pool records …")
-    embs = model.encode(
-        pool_texts,
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-    )
+    logger.info(f"  Loading embedding model {model_name} on {target_device} …")
+    try:
+        model = SentenceTransformer(model_name, device=target_device)
+    except Exception as e:
+        logger.warning(f"Failed to load {model_name} on {target_device}: {e}. Falling back to CPU.")
+        target_device = "cpu"
+        model = SentenceTransformer(model_name, device="cpu")
+
+    logger.info(f"  Encoding {len(pool_texts):,} pool records on {target_device} …")
+    try:
+        embs = model.encode(
+            pool_texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            device=target_device,
+        )
+    except Exception as e:
+        if target_device == "cuda":
+            logger.warning(f"CUDA encoding failed ({e}); clearing cache and falling back to CPU.")
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            model = model.to("cpu")
+            target_device = "cpu"
+            embs = model.encode(
+                pool_texts,
+                batch_size=max(16, batch_size // 2),
+                normalize_embeddings=True,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                device="cpu",
+            )
+        else:
+            raise e
+
     embs = embs.astype(np.float32)
     dim = embs.shape[1]
 
@@ -105,18 +165,44 @@ def _embedding_topk(
     top_k: int,
     min_score: float,
     batch_size: int = 64,
+    device: str = "auto",
 ) -> dict[str, list[str]]:
     if index is None or model is None:
         return {}
 
-    logger.info(f"  Encoding {len(s1_texts):,} query records …")
-    q_embs = model.encode(
-        s1_texts,
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-    ).astype(np.float32)
+    target_device = "cpu"
+    if device == "cuda" or (device == "auto" and _is_cuda_available()):
+        target_device = "cuda"
+
+    logger.info(f"  Encoding {len(s1_texts):,} query records on {target_device} …")
+    try:
+        q_embs = model.encode(
+            s1_texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            device=target_device,
+        ).astype(np.float32)
+    except Exception as e:
+        if target_device == "cuda":
+            logger.warning(f"CUDA query encoding failed ({e}); falling back to CPU.")
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            model = model.to("cpu")
+            q_embs = model.encode(
+                s1_texts,
+                batch_size=max(16, batch_size // 2),
+                normalize_embeddings=True,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                device="cpu",
+            ).astype(np.float32)
+        else:
+            raise e
 
     pool_arr = np.array(pool_ids)
     results: dict[str, list[str]] = defaultdict(list)
@@ -143,6 +229,7 @@ def generate_candidates(
     embed_min_score: float = 0.70,
     embed_model: str = "intfloat/multilingual-e5-large",
     use_embeddings: bool = True,
+    device: str = "auto",
 ) -> dict[str, list[str]]:
     """
     Returns: { source1_entity_id → sorted unique list of candidate IDs (S2-*/S3-*) }
@@ -183,11 +270,14 @@ def generate_candidates(
     # ── Embedding pass 3: semantic kNN ───────────────────────────────────
     if use_embeddings:
         logger.info(f"Blocking pass 3/3: embedding kNN ({embed_model}) …")
-        index, model = _build_embedding_index(pool_ids, list(pool["_emb_text"]), embed_model)
+        index, model = _build_embedding_index(
+            pool_ids, list(pool["_emb_text"]), embed_model, device=device
+        )
         for qid, cids in _embedding_topk(
             list(s1["_emb_text"]), s1_ids,
             pool_ids, index, model,
             top_k_embed, embed_min_score,
+            device=device,
         ).items():
             candidates[qid].update(cids)
     else:
@@ -206,22 +296,51 @@ def store_embedding_model(
     pool: pd.DataFrame,
     model_name: str,
     save_dir: str,
+    device: str = "auto",
 ) -> None:
     """Pre-encode pool once and save embeddings + FAISS index to disk."""
-    import os
-    import pickle
-    import faiss
-    from sentence_transformers import SentenceTransformer
+    if not _HAS_FAISS or not _HAS_SENTENCE_TRANSFORMERS or faiss is None or SentenceTransformer is None:
+        raise ImportError(
+            "store_embedding_model requires 'sentence-transformers' and 'faiss-cpu' to be installed. "
+            "Please install them via: pip install faiss-cpu sentence-transformers"
+        )
+
+    target_device = "cpu"
+    if device == "cuda" or (device == "auto" and _is_cuda_available()):
+        target_device = "cuda"
 
     os.makedirs(save_dir, exist_ok=True)
-    model = SentenceTransformer(model_name)
+    logger.info(f"Loading {model_name} on {target_device} for offline indexing...")
+    try:
+        model = SentenceTransformer(model_name, device=target_device)
+    except Exception as e:
+        logger.warning(f"Failed to load {model_name} on {target_device}: {e}. Falling back to CPU.")
+        target_device = "cpu"
+        model = SentenceTransformer(model_name, device="cpu")
+
     texts = list(pool["_emb_text"])
-    embs = model.encode(
-        texts,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-    ).astype(np.float32)
+    try:
+        embs = model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            device=target_device,
+        ).astype(np.float32)
+    except Exception as e:
+        if target_device == "cuda":
+            logger.warning(f"CUDA encoding failed ({e}); falling back to CPU.")
+            model = model.to("cpu")
+            embs = model.encode(
+                texts,
+                normalize_embeddings=True,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                device="cpu",
+            ).astype(np.float32)
+        else:
+            raise e
+
     index = faiss.IndexFlatIP(embs.shape[1])
     index.add(embs)
     faiss.write_index(index, os.path.join(save_dir, "pool.faiss"))

@@ -27,18 +27,77 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 
 logger = logging.getLogger(__name__)
+
+
+def is_cuda_available() -> bool:
+    """Check if CUDA is available via PyTorch."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
+
+
+def safe_fit(model: Any, X: np.ndarray, y: np.ndarray) -> Any:
+    """Fit model with automatic fallback to CPU if GPU / CUDA fails."""
+    try:
+        model.fit(X, y)
+        return model
+    except Exception as e:
+        err = str(e).lower()
+        if any(kw in err for kw in ("cuda", "gpu", "device", "memory", "out of memory", "tree learner")):
+            logger.warning(f"GPU execution failed for {type(model).__name__}: {e}. Falling back to multi-core CPU...")
+            if hasattr(model, "set_params"):
+                try:
+                    model.set_params(device="cpu", n_jobs=-1)
+                except Exception:
+                    try:
+                        model.set_params(device="cpu")
+                    except Exception:
+                        pass
+            model.fit(X, y)
+            return model
+        raise e
+
+
+def safe_predict_proba(model: Any, X: np.ndarray) -> np.ndarray:
+    """Predict probabilities with automatic fallback to CPU if GPU / CUDA fails."""
+    try:
+        return model.predict_proba(X)
+    except Exception as e:
+        err = str(e).lower()
+        if any(kw in err for kw in ("cuda", "gpu", "device", "memory", "out of memory")):
+            logger.warning(f"GPU prediction failed for {type(model).__name__}: {e}. Retrying on CPU...")
+            if hasattr(model, "set_params"):
+                try:
+                    model.set_params(device="cpu", n_jobs=-1)
+                except Exception:
+                    try:
+                        model.set_params(device="cpu")
+                    except Exception:
+                        pass
+            return model.predict_proba(X)
+        raise e
 
 
 # ── Base model factory ──────────────────────────────────────────────────────
 
 def make_lgbm(cfg: dict) -> Any:
-    from lightgbm import LGBMClassifier
+    device = cfg.get("device", "auto")
+    # For LightGBM on Windows, binary packages often lack GPU/CUDA tree learner.
+    # If device is explicitly 'cuda' or 'gpu', we configure it; otherwise default to multi-threaded CPU.
+    lgb_device = "cpu"
+    if device in ("cuda", "gpu"):
+        lgb_device = device
+
     return LGBMClassifier(
         n_estimators=cfg.get("n_estimators", 500),
         max_depth=cfg.get("max_depth", 7),
@@ -49,25 +108,35 @@ def make_lgbm(cfg: dict) -> Any:
         subsample=0.8,
         min_child_samples=20,
         n_jobs=-1,
+        device=lgb_device,
         random_state=cfg.get("random_state", 42),
         verbose=-1,
     )
 
 
 def make_xgb(cfg: dict) -> Any:
-    from xgboost import XGBClassifier
-    return XGBClassifier(
+    device = cfg.get("device", "auto")
+    cuda_ok = (device == "cuda") or (device == "auto" and is_cuda_available())
+
+    xgb_params: dict[str, Any] = dict(
         n_estimators=cfg.get("n_estimators", 500),
         max_depth=cfg.get("max_depth", 6),
         learning_rate=cfg.get("learning_rate", 0.03),
         scale_pos_weight=cfg.get("scale_pos_weight", 15),
         colsample_bytree=0.8,
         subsample=0.8,
-        n_jobs=-1,
         random_state=cfg.get("random_state", 42),
         eval_metric="logloss",
         verbosity=0,
     )
+    if cuda_ok:
+        logger.info("Configuring XGBoost with CUDA GPU acceleration (device='cuda').")
+        xgb_params.update(tree_method="hist", device="cuda")
+    else:
+        logger.info("Configuring XGBoost on CPU (device='cpu', n_jobs=-1).")
+        xgb_params.update(tree_method="hist", device="cpu", n_jobs=-1)
+
+    return XGBClassifier(**xgb_params)
 
 
 # ── OOF K-fold training ─────────────────────────────────────────────────────
@@ -94,8 +163,8 @@ def train_oof(
         y_tr, y_va = y[tr_idx], y[va_idx]
 
         m = pickle.loads(pickle.dumps(model))   # fresh copy each fold
-        m.fit(X_tr, y_tr)
-        oof[va_idx] = m.predict_proba(X_va)[:, 1]
+        safe_fit(m, X_tr, y_tr)
+        oof[va_idx] = safe_predict_proba(m, X_va)[:, 1]
         fold_models.append(m)
         logger.info(f"  Fold {fold}/{n_splits} done")
 

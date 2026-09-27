@@ -25,7 +25,7 @@ import yaml
 from src.blocking import generate_candidates
 from src.features import FEATURE_NAMES, add_margin_feature, build_feature_matrix
 from src.io_utils import load_source, write_candidate_pairs, write_matching_results
-from src.models import load_artefact, meta_predict
+from src.models import load_artefact, meta_predict, safe_predict_proba
 from src.threshold import apply_threshold
 
 logging.basicConfig(
@@ -111,8 +111,8 @@ def predict(cfg: dict) -> None:
     logger.info(f"Threshold={threshold:.4f}  MarginGap={margin_gap:.4f}")
 
     # ── Score ─────────────────────────────────────────────────────────────
-    lgbm_p = lgbm_final.predict_proba(X)[:, 1]
-    xgb_p  = xgb_final.predict_proba(X)[:, 1]
+    lgbm_p = safe_predict_proba(lgbm_final, X)[:, 1]
+    xgb_p  = safe_predict_proba(xgb_final, X)[:, 1]
 
     embed_idx = FEATURE_NAMES.index("embed_cosine")
     deg_idx   = FEATURE_NAMES.index("candidate_degree_log")
