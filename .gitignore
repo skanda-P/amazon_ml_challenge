@@ -1,0 +1,38 @@
+# ── Data files (large TSVs — never commit) ──────────────────────────────────
+data/dataset/
+output/
+
+# ── Model artefacts ──────────────────────────────────────────────────────────
+code/business_entity_resolution/models/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.whl
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Submission zip ────────────────────────────────────────────────────────────
+*_submission.zip

@@ -1,0 +1,35 @@
+# ── Model configuration ─────────────────────────────────────────────────────
+# Edit this file to change any hyper-parameter.
+# Paths are relative to code/business_entity_resolution/
+
+data:
+  train_dir: "../../data/dataset/train"
+  test_dir:  "../../data/dataset/test"
+
+blocking:
+  top_k_name:      10     # top-k S2/S3 candidates per S1 entity by name similarity
+  top_k_addr:      10     # top-k S2/S3 candidates per S1 entity by address similarity
+  name_min_score:  0.25   # minimum TF-IDF cosine score to include in name pass
+  addr_min_score:  0.20   # minimum TF-IDF cosine score to include in address pass
+
+model:
+  type:             xgboost   # "xgboost" | "lightgbm"
+  n_estimators:     300
+  max_depth:        6
+  learning_rate:    0.05
+  scale_pos_weight: 10        # ratio neg/pos — increase if too many false positives
+
+validation:
+  val_size:       0.15   # fraction of S1 entities held out for threshold tuning
+  random_state:   42
+
+threshold:
+  search_start:  0.10
+  search_end:    0.90
+  search_steps:  50
+
+output:
+  model_path:     "models/matcher.pkl"
+  threshold_path: "models/threshold.txt"
+  matching_path:  "../../output/matching_results.tsv"
+  candidate_path: "../../output/candidate_pairs.tsv"
